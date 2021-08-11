@@ -16,9 +16,9 @@ lock = multiprocessing.Lock()
 sql_config = {
     "host": "xx.xx.xx.xx",
     "port": 3306,
-    "user": "loguser01",
+    "user": "username",
     "passwd": "*******",
-    "db": "netflow",
+    "db": "dbname",
     "charset": "utf8"
 }
 
