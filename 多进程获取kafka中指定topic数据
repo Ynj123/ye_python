@@ -1,0 +1,103 @@
+#!/usr/bin/python
+# -*- coding: UTF-8 -*-
+import sys
+from kafka import KafkaConsumer,TopicPartition,OffsetAndMetadata
+import MySQLdb as mdb
+import time
+import multiprocessing
+import datetime
+import json
+import re
+
+reload(sys)
+sys.setdefaultencoding('utf-8')
+lock = multiprocessing.Lock()
+
+sql_config = {
+    "host": "10.8.120.153",
+    "port": 3306,
+    "user": "loguser01",
+    "passwd": "pigisnotdog",
+    "db": "netflow",
+    "charset": "utf8"
+}
+
+def USG_Traffic_Consume(process_name,partition_no):
+    print('this is ' + process_name)
+    mytopic = "USG_TRAFFIC"
+    myhost = "10.8.120.59:9092"
+    groupid = "usg_traffic_consumer1"
+    global sql_config
+    Insert_str = 'insert into usg_log(plat_id,plat_name,createtime,devName,logType,sourceIp,sourcePort,destinationIp,destinationPort) values '
+    consumer = KafkaConsumer(bootstrap_servers=[myhost],group_id=groupid,client_id = process_name)
+    tp = TopicPartition(mytopic,partition_no)
+    consumer.assign([tp])
+    init_time = int(round(time.time()*1000))                             #设定初始时间
+    sqllist = ""
+    conum = 0
+    print(process_name + ' start to get data from kafka')
+    for message in consumer:
+        # print message.value
+        temp = re.sub("%{.*?}", "", message.value)
+        msg = temp.split(",")
+    #     # print msg
+        plat_id = msg[0]
+        plat_name = msg[1]
+        try:
+            timestamp = datetime.datetime.strptime(msg[2], '%Y/%m/%d %H:%M:%S')
+        except:
+            #print("time error:")
+            #print(msg)
+            continue
+        devName = msg[3]
+        logType = msg[4]
+        sourceIp = msg[5]
+        sourcePort = msg[6]
+        destinationIp = msg[7]
+        destinationPort = msg[8]
+        if sourceIp == "" or destinationIp == "":
+            continue
+        # print(plat_id,plat_name,timestamp,devName,logType,sourceIp,sourcePort,destinationIp,destinationPort)
+        new_time = int(round(time.time()*1000))                           #获取当前时间
+        if sqllist != "":
+            sqllist += ","
+        sqllist += '("%s","%s","%s","%s","%s","%s","%s","%s","%s")' %(plat_id,plat_name,timestamp,devName,logType,sourceIp,sourcePort,destinationIp,destinationPort)
+        conum += 1
+        time_cha = (new_time - init_time)/60           #计算当前时间与记录的时间差值的分钟数
+        if time_cha >= 2 or conum == 1000:
+            #达到两分钟时，将所有信息写入数据库
+            try:
+                sql_str = Insert_str + sqllist + ";"
+                # print(sql_str)
+                lock.acquire()
+                sql_conn = mdb.connect(**sql_config)
+                sql_cursor = sql_conn.cursor()
+                sql_cursor.execute(sql_str)
+                sql_conn.commit()
+                sql_conn.close()
+                lock.release()
+                init_time = new_time                   #将当前时间作为初始时间
+                sqllist = ""
+                conum = 0
+            except Exception as e:
+                print('insert to mysql error :' + str(e))
+                print(Insert_str + sqllist + ";")
+                conum = 0
+    return
+
+
+
+if __name__ == '__main__':
+    process_list = []
+    processno = 8
+    for i in range(processno):
+        process_name = 'process_' + str(i)
+        partition_no = i
+        # client_id = 'esight_version_consumer' + str(i)
+        new_process = multiprocessing.Process(target = USG_Traffic_Consume, args = [process_name,partition_no])
+        process_list.append(new_process)
+    for t in process_list:
+        t.start()
+    for t in process_list:
+        t.join()
+    # USG_Session_Traffic_Consume("process_1",0)
