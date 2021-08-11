@@ -14,10 +14,10 @@ sys.setdefaultencoding('utf-8')
 lock = multiprocessing.Lock()
 
 sql_config = {
-    "host": "10.8.120.153",
+    "host": "xx.xx.xx.xx",
     "port": 3306,
     "user": "loguser01",
-    "passwd": "pigisnotdog",
+    "passwd": "*******",
     "db": "netflow",
     "charset": "utf8"
 }
