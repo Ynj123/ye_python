@@ -8,9 +8,9 @@ import MySQLdb as db
 
 sql_config = {
     "host": "xx.xx.xx.xx",
-    "user": "loguser01",
+    "user": "username",
     "port": 3306,
-    "db": "secdata",
+    "db": "dbname",
     "passwd": "*****",
     "charset": "utf8"
 }
