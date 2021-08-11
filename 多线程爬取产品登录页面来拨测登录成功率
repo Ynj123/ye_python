@@ -1,0 +1,327 @@
+#!/usr/bin/python
+# -*- coding: UTF-8 -*-
+import requests
+import sys
+import json
+import urllib3
+import MySQLdb as mdb
+import time
+import datetime
+import threading
+import traceback
+import base64
+from Crypto.Cipher import AES
+
+
+urllib3.disable_warnings()
+reload(sys)
+sys.setdefaultencoding( "utf-8" )
+lock = threading.Lock()
+sender = '发送邮箱地址'
+receiver = ['邮件地址']
+msg_batch = ""
+nowtime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+sql_config = {
+    "host": "xx.xx.xx.xx",
+    "port": 3306,
+    "user": "username",
+    "passwd": "*****",
+    "db": "dbname",
+    "charset": "utf8"
+}
+mail_server = '邮件服务器ip'
+mail_port = '25'
+sql_conn = mdb.connect(**sql_config)
+sql_cursor = sql_conn.cursor()
+key_str = '随机密码'
+todayTime = str(int(time.mktime(time.strptime(str(datetime.date.today()), '%Y-%m-%d'))))
+wafErrorList = [] # 有问题waf列表
+# newList = ["10.0.233.246"] # 新版本waf清单
+
+
+def GetNewVersionList():
+    sql_str = 'select ip_addr from zwy_waf_deploy_track where remark="open" and deploy is not null and software_version="S20";'
+    NewVerList = []
+    try:
+        sql_cursor.execute(sql_str)
+        baseList = sql_cursor.fetchall()
+        for base in baseList:
+            NewVerList.append(base[0])
+    except Exception as e:
+        print("Catch new version error:" + str(e))
+    return NewVerList
+
+def decrypt(text):
+    global key_str
+    cryptor = AES.new(key_str, AES.MODE_CBC, key_str)
+    plain_text = cryptor.decrypt(base64.standard_b64decode(text)).decode()
+    return plain_text.strip(b'\x00'.decode())
+
+
+def GetBaseList():
+    sql_str = 'select description,ip_addr,platform_id from zwy_waf_deploy_track where remark="open" and deploy is not null;'
+    sql_cursor.execute(sql_str)
+    baseList = sql_cursor.fetchall()
+    return list(baseList)
+
+
+def CatchPasswd():
+    sql_select = 'SELECT plat_id,user_name,ciphertext FROM `zwy_dev_passwd` WHERE dev_name="WAF";'
+    try:
+        lock.acquire()
+        global sql_cursor
+        sql_cursor.execute(sql_select)
+        passwd = list(sql_cursor.fetchall())
+        if not passwd:
+            print(nowtime)
+            print("获取基地密码失败:找不到waf密码")
+            passwd = []
+    except Exception as e:
+        print(nowtime)
+        print("获取基地waf密码失败:"+str(e))
+        passwd = []
+    lock.release()
+    return passwd
+
+
+def testWaf(ip,username,password):
+    request1 = "0"
+    login1 = "0"
+    node_status = "0"
+    today_attack = "null"
+    all_attack = "null"
+    all_request = "null"
+    not_before = "null"
+    not_after = "null"
+    s = requests.session()
+    headers = {
+        'accept':'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'accept-encoding': 'gzip, deflate, br',
+        'accept-language': 'zh-CN,zh;q=0.9',
+        'user-agent':'Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/71.0.3578.80 Safari/537.36'
+    }
+    global todayTime
+    url = "https://%s:9443/login" %ip # 登录界面
+    urlgettoken = 'https://%s:9443/api/v1/profile' %ip # 获取登录token
+    urlLog = "https://%s:9443/api/v1/login" %ip # 登录url
+    urlnode = "https://%s:9443/api/v1/stat/node" %ip # 获取节点状态
+    urlattack = "https://%s:9443/api/v1/stat/basic?time_after=0" %ip # 获取总攻击请求
+    urlattackToday = "https://%s:9443/api/v1/stat/basic?time_after=%s" %(ip,todayTime) # 获取今日攻击数
+    urlLicense = "https://%s:9443/api/v1/license" %ip
+    try:
+        s.get(urlgettoken,headers=headers,verify=False,timeout=15)
+        r = s.get(url,headers=headers,verify=False,timeout=15)
+        if 'SafeLine' in r.text:
+            request1 = '1'
+            cookie = r.request.headers['Cookie'][10:]
+        else:
+            return request1,login1,node_status,today_attack,all_attack,all_request,not_before,not_after
+    except Exception as e:
+        print(nowtime)
+        print(ip+":"+str(e))
+        print('traceback.print_exc():'); traceback.print_exc()
+        return request1,login1,node_status,today_attack,all_attack,all_request,not_before,not_after
+    data = {
+        'username':username,
+        'password':password
+    }
+    headers['referer'] = url
+    headers['origin'] = url[:-6]
+    headers['x-csrftoken'] = cookie
+    try:
+        rs = s.post(urlLog,headers=headers,data=data,verify=False,timeout=15)
+        errmes = json.loads(rs.content)["err"]
+        if not errmes:
+            login1 = '1'
+        else:
+            print(nowtime)
+            print('%s login error : %s' %(ip,errmes))
+            return request1,login1,node_status,today_attack,all_attack,all_request,not_before,not_after
+    except Exception as e:
+        print(nowtime)
+        print('%s login error : %s' %(ip,str(e)))
+        return request1,login1,node_status,today_attack,all_attack,all_request,not_before,not_after
+    try:
+        rtest = s.get(urlnode,verify=False,timeout=15)
+        if json.loads(rtest.content)["data"][0]["status"] == "normal":
+            node_status = '1'
+    except Exception as e:
+        print(nowtime)
+        print('%s catch node_status error : %s' %(ip,str(e)))
+    try:
+        attackGet = s.get(urlattack,verify=False,timeout=15)
+        attackGetToday = s.get(urlattackToday,verify=False,timeout=15)
+        today_attack = '"' + str(json.loads(attackGetToday.content)["data"]["web_attack"]) + '"'
+        attackGet = json.loads(attackGet.content)
+        all_attack = '"' + str(attackGet["data"]["web_attack"]) + '"'
+        all_request = '"' + str(attackGet["data"]["request"]) + '"'
+    except Exception as e:
+        print(nowtime)
+        print('%s catch attack error : %s' %(ip,str(e)))
+        print('traceback.print_exc():'); traceback.print_exc()
+    try:
+        licenseGet = s.get(urlLicense,verify=False,timeout=15)
+        licenseGet = json.loads(licenseGet.content)
+        not_before = '"' + licenseGet['data']['not_before'] + '"'
+        not_after = '"' + licenseGet['data']['not_after'] + '"'
+    except Exception as e:
+        print(e)
+    return request1,login1,node_status,today_attack,all_attack,all_request,not_before,not_after
+
+
+def testWafNew(ip,username,password):
+    request1 = "0"
+    login1 = "0"
+    node_status = "0"
+    today_attack = "null"
+    all_attack = "null"
+    all_request = "null"
+    not_before = "null"
+    not_after = "null"
+    s = requests.session()
+    headers = {
+        'accept':'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'accept-encoding': 'gzip, deflate, br',
+        'accept-language': 'zh-CN,zh;q=0.9',
+        'user-agent':'Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/71.0.3578.80 Safari/537.36'
+    }
+    url = "https://%s:9443/login" %ip # 登录界面
+    urlgettoken = 'https://%s:9443/api/CSRFTokenAPI' %ip # 获取登录token
+    urlLog = "https://%s:9443/api/LoginAPI" %ip # 登录url
+    urlnode = "https://%s:9443/api/NodeInfoAPI" %ip # 获取节点状态
+    urlattack = "https://%s:9443/api/OverviewAPI?duration=d&host=attack&location=world&request_number=attack&src_ip=attack&attack_type=attack&total=true" %ip # 获取总攻击请求
+    urlattackToday = "https://%s:9443/api/OverviewAPI?duration=h&host=attack&location=world&request_number=attack&src_ip=attack&attack_type=attack&total=true" %ip # 获取今日攻击数
+    urlLicense = "https://%s:9443/api/LicenseAPI" %ip
+    try:
+        s.get(urlgettoken,headers=headers,verify=False,timeout=15)
+        r = s.get(url,headers=headers,verify=False,timeout=15)
+        if 'SafeLine' in r.text:
+            request1 = '1'
+            cookie = r.request.headers['Cookie'][10:]
+        else:
+            return request1,login1,node_status,today_attack,all_attack,all_request,not_before,not_after
+    except Exception as e:
+        print(nowtime)
+        print(ip+":"+str(e))
+        print('traceback.print_exc():'); traceback.print_exc()
+        return request1,login1,node_status,today_attack,all_attack,all_request,not_before,not_after
+    data = {
+        'username':username,
+        'password':password
+    }
+    headers['referer'] = url
+    headers['origin'] = url[:-6]
+    headers['x-csrftoken'] = cookie
+    try:
+        rs = s.post(urlLog,headers=headers,data=data,verify=False,timeout=15)
+        errmes = json.loads(rs.content)["err"]
+        if not errmes:
+            login1 = '1'
+        else:
+            print(nowtime)
+            print('%s login error : %s' %(ip,errmes))
+            return request1,login1,node_status,today_attack,all_attack,all_request,not_before,not_after
+    except Exception as e:
+        print(nowtime)
+        print('%s login error : %s' %(ip,str(e)))
+        return request1,login1,node_status,today_attack,all_attack,all_request,not_before,not_after
+    try:
+        rtest = s.get(urlnode,verify=False,timeout=15)
+        if json.loads(rtest.content)["data"][0]["node"]["status"] == "HEALTHY":
+            node_status = '1'
+    except Exception as e:
+        print(nowtime)
+        print('%s catch node_status error : %s' %(ip,str(e)))
+    try:
+        attackGet = s.get(urlattack,verify=False,timeout=15)
+        attackGetToday = s.get(urlattackToday,verify=False,timeout=15)
+        today_attack = '"' + str(json.loads(attackGetToday.content)["data"]["total"]["attack"]) + '"'
+        attackGet = json.loads(attackGet.content)
+        all_attack = '"' + str(attackGet["data"]["total"]["attack"]) + '"'
+        all_request = '"' + str(attackGet["data"]["total"]["request"]) + '"'
+    except Exception as e:
+        print(nowtime)
+        print('%s catch attack error : %s' %(ip,str(e)))
+        print('traceback.print_exc():'); traceback.print_exc()
+    try:
+        licenseGet = s.get(urlLicense,verify=False,timeout=15)
+        licenseGet = json.loads(licenseGet.content)
+        not_before = '"' + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(licenseGet['data']['not_valid_before'])) + '"'
+        not_after = '"' + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(licenseGet['data']['not_valid_after'])) + '"'
+    except Exception as e:
+        print(e)
+    return request1,login1,node_status,today_attack,all_attack,all_request,not_before,not_after
+
+
+def TestWafWeb(baselist,keylist):
+    nowtime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    resultsql = ""
+    for i in baselist:
+        username = ""
+        ciphertext = ""
+        if i[1] == None or i[1] == "":
+            continue
+        if resultsql != "":
+            resultsql += ","
+        if str(i[1]).strip() in wafErrorList:
+            resultsql += '("%s","%s","%s","%s","0","0","0",null,null,null,null,null)' % (nowtime,str(i[2]),str(i[0]).strip(),str(i[1]).strip())
+            continue
+        wafid = str(i[2]).strip()
+        for j in keylist:
+            if str(j[0]) == wafid:
+                username = j[1]
+                ciphertext = j[2]
+                break
+        if not ciphertext or not username:
+            resultsql += '("%s","%s","%s","%s","0","0","0",null,null,null,null,null)' % (nowtime,str(i[2]),str(i[0]).strip(),str(i[1]).strip())
+            print(nowtime)
+            print(str(i[1]).strip()+" have no username or passwd")
+            continue
+        password = decrypt(ciphertext)
+        if not str(i[1]).strip() in newList:
+            request1,login1,node_status,today_attack,all_attack,all_request,not_before,not_after = testWaf(str(i[1]).strip(),username,password)
+        else:
+            request1,login1,node_status,today_attack,all_attack,all_request,not_before,not_after = testWafNew(str(i[1]).strip(),username,password)
+        resultsql += '("%s","%s","%s","%s","%s","%s","%s",%s,%s,%s,%s,%s)' %(nowtime,str(i[2]),str(i[0]).strip(),str(i[1]).strip(),request1,login1,node_status,today_attack,all_attack,all_request,not_before,not_after)
+    Insert_str = 'insert into WafTestWebResult(time,platform_id,base,IP,result,login,node_status,today_attack,all_attack,all_request,not_before,not_after) values '
+    sql_str = Insert_str + resultsql + ";"
+    # print sql_str
+    try:
+        lock.acquire()
+        # print(sql_str)
+        global sql_cursor
+        sql_delete = 'DELETE FROM WafTestWebResult WHERE DATE(time) <= DATE(DATE_SUB(NOW(),INTERVAL 7 day));'
+        sql_cursor.execute(sql_str)#添加记录
+        sql_cursor.execute(sql_delete)#删除七天前数据
+        sql_conn.commit()
+    except Exception as e:
+        print(e)
+        print(sql_str)
+    lock.release()
+
+
+if __name__ == '__main__':
+# https://10.0.227.85:9443/api/v1/login
+    newList = GetNewVersionList()
+    IntervalTime = 3600#告警邮件发送间隔时间
+    baselist = GetBaseList()
+    keylist = CatchPasswd()
+    process_list = []
+    processno = 4
+    avgno = len(baselist) // processno
+    for i in range(processno):
+        if i == (processno-1):
+            targetlist = baselist[i*(avgno+1):]
+            new_process = threading.Thread(target = TestWafWeb, args = (targetlist,keylist))
+        else:
+            targetlist = baselist[i*(avgno+1):(i+1)*(avgno+1)]
+            new_process = threading.Thread(target = TestWafWeb, args = (targetlist,keylist))
+        process_list.append(new_process)
+    for t in process_list:
+        t.start()
+    for t in process_list:
+        t.join()
+    sql_cursor.close()
+    sql_conn.close()
