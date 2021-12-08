@@ -1,0 +1,180 @@
+#!/usr/bin/python
+# -*- coding: UTF-8 -*-
+import MySQLdb as db
+import time
+import datetime
+import sys
+import os
+import json
+
+reload(sys)
+sys.setdefaultencoding('utf-8')
+
+sql_conf = {
+    "host": "10.8.120.101",
+    "user": "loguser01",
+    "passwd": "pigisnotdog",
+    "db": "secdata",
+    "port": 3306,
+    "charset": "utf8"
+}
+
+def sql_exec(sql_str):
+    if sql_str:
+        try:
+            db_conn = db.connect(**sql_conf)
+            db_cur = db_conn.cursor()
+            db_cur.execute(sql_str)
+            db_conn.commit()
+            if sql_str.strip().upper()[:5] == "SELEC":
+                rs = db_cur.fetchall()
+                return rs
+            db_conn.close()
+        except Exception as e:
+            print(sql_str)
+            print(e)
+    else:
+        return {}
+
+def get_white_data():
+    white_dic = {}
+    sql_str = 'select plat_id,base,type from zwy_warning_email_whitelist where plat_id != "Null";'
+    white_data = sql_exec(sql_str)
+    for item in white_data:
+        if item:
+            p_id = str(item[0])
+            p_name = item[1]
+            device_type = item[2]
+            white_dic[p_id] = {"p_name":p_name,"device_type":device_type}
+    return white_dic
+
+def get_gwdata():
+    gw_dic = {}
+    sql_str = 'select plat_id,plat_name,monitor_time,plat_status,monitor_status,monitor_method from zwy_bases_subnet_gw where plat_id is not null;'
+    gw_data = sql_exec(sql_str)
+    for item in gw_data:
+        if item:
+            p_id = str(item[0])
+            p_name = item[1]
+            p_time = str(item[2])
+            p_status = item[3]
+            m_stat = item[4]
+            m_meth = item[5]
+            gw_dic[p_id] = {"p_name":p_name,"p_time":p_time,"p_status":p_status,"m_stat":m_stat,"m_meth":m_meth}
+    return gw_dic
+
+#获取30分钟后30分钟内各基地平均日志量
+def get_befor_data():
+    befor_data = {}
+    sql_str = """
+    select plat_id,plat_name,round(avg(log_size),0) as avg_size from zwy_log_monitor 
+    where time > DATE_SUB(now(),interval 1 hour) and time < DATE_SUB(now(),interval 30 minute)
+    group by plat_id,plat_name order by plat_id
+    """
+    moni_data = sql_exec(sql_str)
+    for item in moni_data:
+        if item:
+            log_pid = str(item[0])
+            log_pname = item[1]
+            avg_size = int(item[2])
+            befor_data[log_pid] = {"befor_log_pname":log_pname,"befor_log_size":avg_size}
+    return befor_data
+
+def get_new_data():
+    new_data = {}
+    sql_str = """
+    select plat_id,plat_name,round(avg(log_size),0) as avg_size from zwy_log_monitor 
+    where time > DATE_SUB(now(),interval 30 minute)
+    group by plat_id,plat_name order by plat_id
+    """
+    moni_data = sql_exec(sql_str)
+    for item in moni_data:
+        if item:
+            log_pid = str(item[0])
+            log_pname = item[1]
+            avg_size = int(item[2])
+            new_data[log_pid] = {"new_log_pname":log_pname,"new_log_size":avg_size}
+    return new_data
+
+
+def get_data():
+    white_data = get_white_data()
+    gw_data = get_gwdata()
+    befor_data = get_befor_data()
+    new_data = get_new_data()
+
+    logmoni_dic = {}
+    logmoni_dic['attribute'] = {}
+    logmoni_dic['attribute']['title'] = "日志服务器"
+    logmoni_dic['attribute']['dev_type'] = "log"
+    logmoni_dic['attribute']['type_order'] = ['log_desc','log_asc']
+    logmoni_dic['attribute']['process_require'] = 'yes'
+    logmoni_dic['data'] = {}
+
+    cur_time = time.time()
+
+    if new_data and befor_data:
+        for new_log_items in new_data:
+            if new_log_items in befor_data:
+                befor_log_size = befor_data[new_log_items]['befor_log_size']    #定义30分钟后30分钟对应平台的平均日志量的变量
+            else:
+                befor_log_size = 0
+            new_log_size = new_data[new_log_items]['new_log_size']      #定义获取30分钟内对应平台的平均日志量的变量
+            log_cha = round((new_log_size - befor_log_size) / 1024 / 1024, 2)
+            logmoni_dic['data'][int(new_log_items)] = {}
+            #logmoni_dic['data'][int(new_log_items)]['new_logsize'] = new_log_size
+            #logmoni_dic['data'][int(new_log_items)]['befor_log_size'] = befor_log_size
+            logmoni_dic['data'][int(new_log_items)]['plat_name'] = new_data[new_log_items]['new_log_pname']
+
+            if new_log_items in white_data:
+                device_type = white_data[new_log_items]['device_type']  # 获取白名单设备类型
+                if (device_type == "" or device_type is None or device_type == "日志服务器"):
+                    if new_log_size !=0 or befor_log_size != 0:   #当白名单表中有对应平台id，且日志量为不为0时，展示相应日志量
+                        logmoni_dic['data'][int(new_log_items)]['log_asc'] = log_cha
+                        logmoni_dic['data'][int(new_log_items)]['log_desc'] = log_cha
+                    else:
+                        logmoni_dic['data'][int(new_log_items)]['log_asc'] = "不涉及"
+                        logmoni_dic['data'][int(new_log_items)]['log_desc'] = "不涉及"
+                        continue
+
+            if new_log_items in gw_data:
+
+                p_stat = gw_data[new_log_items]["p_status"]  # 获取gw表的平台状态
+                log_stat = gw_data[new_log_items]['m_stat']  # 获取gw表的监控状态
+
+                if p_stat == "ON" and log_stat == "active":
+                    if new_log_items in befor_data:
+                        logmoni_dic['data'][int(new_log_items)]['log_asc'] = log_cha
+                        logmoni_dic['data'][int(new_log_items)]['log_desc'] = log_cha
+                    else:
+                        log_cha = new_log_size
+                        logmoni_dic['data'][int(new_log_items)]['log_asc'] = log_cha
+                        logmoni_dic['data'][int(new_log_items)]['log_desc'] = log_cha
+                elif p_stat == "ON" and log_stat == "inactive":
+                    logmoni_dic['data'][int(new_log_items)]['log_asc'] = "没有数据"
+                    logmoni_dic['data'][int(new_log_items)]['log_desc'] = "没有数据"
+                elif p_stat == "NA" and log_stat is None:
+                    logmoni_dic['data'][int(new_log_items)]['log_asc'] = log_cha
+                    logmoni_dic['data'][int(new_log_items)]['log_desc'] = log_cha
+                elif p_stat == "NA" and log_stat == "inactive":
+                    if new_log_items in befor_data:
+                        gw_time = time.mktime(time.strptime(gw_data[new_log_items]["p_time"],"%Y-%m-%d %H:%M:%S"))
+                        if (cur_time - gw_time) > 1800:
+                            logmoni_dic['data'][int(new_log_items)]['log_asc'] = log_cha
+                            logmoni_dic['data'][int(new_log_items)]['log_desc'] = log_cha
+                        else:
+                            log_cha = new_log_size
+                            logmoni_dic['data'][int(new_log_items)]['log_asc'] = log_cha
+                            logmoni_dic['data'][int(new_log_items)]['log_desc'] = log_cha
+            else:
+                if new_log_size == 0 and befor_log_size == 0:       #当gw表中没有对应平台id，且日志量为0时，显示数据异常
+                    logmoni_dic['data'][int(new_log_items)]['log_asc'] = "没有数据"
+                    logmoni_dic['data'][int(new_log_items)]['log_desc'] = "没有数据"
+                else:
+                    logmoni_dic['data'][int(new_log_items)]['log_asc'] = log_cha
+                    logmoni_dic['data'][int(new_log_items)]['log_desc'] = log_cha
+                    
+    return {"result": {"dev_data": logmoni_dic,"label": "log"}}
+
+if __name__ == '__main__':
+    print(get_data())
