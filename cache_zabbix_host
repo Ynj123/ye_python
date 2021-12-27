@@ -1,0 +1,141 @@
+import requests
+import json
+import MySQLdb as db
+import sys
+
+sql_conf = {
+    "host": "10.8.120.101",
+    "user": "loguser01",
+    "passwd": "pigisnotdog",
+    "db": "secdata",
+    "port": 3306,
+    "charset": "utf8"
+}
+
+headers = {
+    'Content-Type': 'application/json'
+}
+
+class GetZabbix:
+    def __init__(self):
+        #用户信息
+        self.username = "op1"
+        self.password = "zabbix"
+        self.url = "http://10.8.120.178/zabbix/api_jsonrpc.php"
+        self.token = self.getToken()
+
+    def getToken(self):
+        data = {
+            "jsonrpc": "2.0",
+            "method": "user.login",
+            "params": {
+                "user": self.username,
+                "password": self.password
+            },
+            "id": 1,
+            "auth": None
+        }
+        r = requests.post(url=self.url, headers=headers, data=json.dumps(data))
+        token = json.loads(r.content).get("result")
+        return token
+
+    def getHosts(self):
+        data = {
+            "jsonrpc": "2.0",
+            "method": "host.get",
+            "params": {
+                "output": [
+                    #"hostid",
+                    #"ip",
+                    "name",
+                    #"host"
+                ],
+                "selectInterfaces": [
+                    #"interfaceid",
+                    "ip"
+                ],
+            },
+            "id": 2,
+            "auth": self.token
+        }
+        r = requests.post(url=self.url, headers=headers, data=json.dumps(data))
+        res = json.loads(r.content.decode())
+        rest = []
+        for i in range(len(res["result"])):
+            p_name = res["result"][i]["name"]
+            if 'waf1' in p_name or 'waf2' in p_name or 'waf3' in p_name:
+                pname = p_name
+                p_ip = res["result"][i]["interfaces"][0]['ip']
+            else:
+                continue
+            rest.append({"name": pname, "ip": p_ip})
+        #print(res)
+        return rest
+
+
+def execute_sql(sql_str,conf,type):
+    db_con = db.connect(**conf)
+    db_cursor = db_con.cursor()
+    try:
+        db_cursor.execute(sql_str)
+        db_con.commit()
+        if type == "get_rs":
+            rs = db_cursor.fetchall()
+            db_con.close()
+            return rs
+    except Exception as e:
+        print(e)
+        print(sql_str)
+    db_con.close()
+    return
+
+def get_zabbix_host_data():
+    host_data = []
+    sql = "select * from zwy_zabbix_host;"
+    data = execute_sql(sql,sql_conf,"get_rs")
+    for item in data:
+        p_id = str(item[1])
+        server_name = str(item[2]).strip()
+        p_ip = str(item[3]).strip()
+        dev_name = str(item[-1]).strip()
+        host_data.append({"p_ip": p_ip, "plat_id": p_id, "server_name": server_name})
+    return host_data
+
+if __name__ == "__main__":
+    start = GetZabbix()
+    waf_host = start.getHosts()
+    #print(waf_host)
+    host_da = get_zabbix_host_data()
+    #print(host_da)
+    dev_name = "pwaf"
+    p_id = ""
+    insert_str = "insert into zwy_zabbix_host_bak211225 (plat_id,server_name,ip,dev_name) values "
+    val_str = '("%s","%s","%s","%s")'
+    msg_batch = ""
+    for item in waf_host:
+        p_id = ""
+        msg_batch = ""
+        insert_sql = ""
+        ips = item['ip'].strip()
+        #print(ips)
+        names = item['name'].strip()
+        #print(names)
+        names_split = names.split('_')
+        names_new = names_split[0] + "_" + names_split[1]
+        names_new2 = names_split[0] + names_split[1]
+        for i in range(len(host_da)):
+            if (names_new in host_da[i]["server_name"]) or (names_new2 in host_da[i]["server_name"]):
+                p_id = host_da[i]["plat_id"]
+                # if p_id == "":
+                #     msg_batch = ""
+                #     break
+                # else:
+                msg_batch = val_str % (p_id, names, ips, dev_name)
+        if msg_batch:
+            insert_sql = insert_str + msg_batch[:-1] + ");"
+            #execute_sql(insert_sql,sql_conf,"not_rs")
+            print(insert_sql)
+        else:
+            insert_sql = insert_str + "(null,'" + names + "','" + ips + "','" + dev_name + "');"
+            #execute_sql(insert_sql, sql_conf, "not_rs")
+            print(insert_sql)
